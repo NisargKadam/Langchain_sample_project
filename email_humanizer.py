@@ -109,14 +109,11 @@ from langchain_core.prompts import PromptTemplate
 # tool's description (the agent reads this to decide when to use it).
 from langchain_core.tools import tool
 
-# create_react_agent — Creates an agent that follows the ReAct pattern:
-#   Reason → Act → Observe → Repeat
-# This is the simplest and most common agent type in LangChain.
-from langchain.agents import create_react_agent, AgentExecutor
-
-# hub — LangChain Hub has pre-built prompt templates. We'll pull the
-# standard ReAct prompt that tells the agent HOW to think and use tools.
-from langchain import hub
+# create_agent — Creates an agent that follows a tool-calling loop:
+#   The LLM decides which tool to call -> runs the tool -> sees the result
+#   -> decides next step -> repeats until done.
+# This is the standard way to create agents in LangChain.
+from langchain.agents import create_agent
 
 logger.info("All LangChain components imported")
 
@@ -270,56 +267,50 @@ logger.info(f"Tools registered: {[t.name for t in tools]}")
 # Now we put it all together!
 #
 # An agent needs 3 things:
-#   1. An LLM        — to do the thinking (GPT)
-#   2. Tools          — to take actions (our 2 email tools)
-#   3. A Prompt       — to tell the agent HOW to think and use tools
+#   1. An LLM           — to do the thinking (GPT)
+#   2. Tools             — to take actions (our 2 email tools)
+#   3. A system prompt   — to tell the agent its role and how to behave
 #
-# We use the standard "ReAct" prompt from LangChain Hub. This prompt
-# tells the agent to follow the Think → Act → Observe loop.
+# create_agent() wires these together and returns a runnable agent.
+# Under the hood, the agent runs a tool-calling loop:
+#   - It sends the user's message + system prompt to the LLM
+#   - The LLM decides whether to call a tool (and which one)
+#   - If a tool is called, the result is fed back to the LLM
+#   - The LLM decides if it needs another tool or if it's done
+#   - It repeats until the LLM returns a final text response
 #
-# The AgentExecutor is the "runtime" that actually runs the agent loop:
-#   - It sends the prompt to the LLM
-#   - If the LLM wants to use a tool, it runs that tool
-#   - It feeds the tool's output back to the LLM
-#   - It repeats until the LLM gives a Final Answer
+# This is similar to the classic "ReAct" pattern (Reason + Act):
+#   THINK -> ACT -> OBSERVE -> THINK -> ... -> FINAL ANSWER
 # ─────────────────────────────────────────────────────────────────────────
 
-logger.info("Creating the ReAct agent...")
+logger.info("Creating the agent...")
 
-# Pull the standard ReAct prompt from LangChain Hub
-# This prompt contains instructions like:
-#   "You have access to the following tools: ..."
-#   "Use the following format: Thought: ... Action: ... Observation: ..."
-react_prompt = hub.pull("hwchase17/react")
+# The system prompt tells the agent WHO it is and HOW to behave.
+# This is like giving instructions to an employee before they start work.
+SYSTEM_PROMPT = """You are an Email Humanizer assistant. Your job is to help users
+write natural, human-sounding emails.
 
-logger.info("ReAct prompt loaded from LangChain Hub")
+When the user gives you an email idea, follow these steps:
+1. First, use the draft_email tool to create a structured email draft.
+2. Then, use the humanize_email tool to make the draft sound natural and warm.
+3. Return the final humanized email to the user.
 
-# Create the agent by combining: LLM + Tools + Prompt
-# This doesn't RUN the agent yet — it just wires everything together
-agent = create_react_agent(
-    llm=llm,            # The brain (GPT)
-    tools=tools,         # The hands (our email tools)
-    prompt=react_prompt, # The instructions (ReAct format)
-)
+Always use both tools in order: draft first, then humanize."""
 
-logger.info("Agent created")
-
-# Wrap the agent in an AgentExecutor — this is what actually RUNS it
+# create_agent() combines the LLM, tools, and system prompt into one agent.
 # Parameters:
-#   agent          : The agent we just created
-#   tools          : Same tools list (executor needs to know how to call them)
-#   verbose        : True = print the agent's full thought process
-#   handle_parsing_errors : True = gracefully handle any output format issues
-#   max_iterations : Safety limit — stop after N loops to prevent infinite loops
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    verbose=True,                # <-- This prints the full ReAct loop!
-    handle_parsing_errors=True,  # Gracefully handle format errors
-    max_iterations=10,           # Safety limit
+#   model         : The LLM instance (our ChatOpenAI GPT connection)
+#   tools         : List of tools the agent can use (draft + humanize)
+#   system_prompt : Instructions that guide the agent's behavior
+#   debug         : When True, prints the agent's internal reasoning steps
+agent_graph = create_agent(
+    model=llm,                   # The brain (GPT)
+    tools=tools,                 # The hands (our email tools)
+    system_prompt=SYSTEM_PROMPT, # The instructions (role + behavior)
+    debug=True,                  # <-- This prints the agent's reasoning!
 )
 
-logger.info("AgentExecutor ready -- the agent can now run!")
+logger.info("Agent created and ready to run!")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -352,15 +343,21 @@ def run_email_humanizer(email_idea: str) -> str:
     logger.info("=" * 60)
     logger.info(f"USER'S EMAIL IDEA: {email_idea}")
     logger.info("=" * 60)
-    logger.info("Agent is now thinking... watch the ReAct loop below!")
+    logger.info("Agent is now thinking... watch the tool-calling loop below!")
     logger.info("-" * 60)
 
-    # agent_executor.invoke() starts the ReAct loop
-    # We pass a dict with "input" — this is what the agent sees as the task
-    result = agent_executor.invoke({"input": email_idea})
+    # agent_graph.invoke() starts the agent's tool-calling loop.
+    # We pass a dict with "messages" — a list of messages the agent sees.
+    # The HumanMessage represents what the user is asking.
+    from langchain_core.messages import HumanMessage
 
-    # The result is a dict with "input" (what we sent) and "output" (the answer)
-    final_email = result["output"]
+    result = agent_graph.invoke(
+        {"messages": [HumanMessage(content=email_idea)]}
+    )
+
+    # The result contains "messages" — a list of all messages exchanged.
+    # The last message is the agent's final response.
+    final_email = result["messages"][-1].content
 
     logger.info("-" * 60)
     logger.info("Agent finished! Here's your humanized email:")
